@@ -2,9 +2,29 @@ local action_parse = {}
 
 local packets = require('packets')
 local res = require('resources')
+local socket = require('socket')
 
 local combat_events = {}
 local timeline_events = {}
+local party_jobs = {}
+
+windower.register_event('incoming chunk', function(id, data)
+    if id == 0x0DD then
+        local packet = packets.parse('incoming', data)
+        if packet then
+            local name = packet['Name']
+            local main_job = packet['Main job']
+            local sub_job = packet['Sub job']
+            
+            if name and name ~= '' and main_job and sub_job then
+                party_jobs[name] = {
+                    main = res.jobs[main_job] and res.jobs[main_job].en_short or "UNK",
+                    sub = res.jobs[sub_job] and res.jobs[sub_job].en_short or "UNK"
+                }
+            end
+        end
+    end
+end)
 
 local offense_action_messages = {
 	[1] = 'melee', [67] = 'crit', [15] = 'miss', [63] = 'miss',
@@ -74,7 +94,7 @@ end
 
 local function record_event(actor_name, target_name, act_type, action_detail, value, is_hit)
     table.insert(combat_events, {
-        timestamp = os.time(),
+        timestamp = socket.gettime(),
         actor = actor_name,
         target = target_name,
         type = act_type, -- 'offense', 'healing', 'skillchain'
@@ -86,7 +106,7 @@ end
 
 local function record_timeline_event(actor_name, action_name, act_type, damage)
     table.insert(timeline_events, {
-        timestamp = os.time(),
+        timestamp = socket.gettime(),
         actor = actor_name,
         action = action_name,
         type = act_type,
@@ -171,9 +191,18 @@ windower.register_event('action', function(act)
 end)
 
 function action_parse.get_data()
+    local p = windower.ffxi.get_player()
+    if p and p.name and p.main_job_id and p.sub_job_id then
+        party_jobs[p.name] = {
+            main = res.jobs[p.main_job_id] and res.jobs[p.main_job_id].en_short or "UNK",
+            sub = res.jobs[p.sub_job_id] and res.jobs[p.sub_job_id].en_short or "UNK"
+        }
+    end
+
     return {
         combat = combat_events,
-        timeline = timeline_events
+        timeline = timeline_events,
+        jobs = party_jobs
     }
 end
 

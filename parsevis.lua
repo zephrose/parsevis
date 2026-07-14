@@ -16,9 +16,10 @@ local is_silent = false
 local function print_help()
     windower.add_to_chat(207, '[ParseVis] == ParseVis Help ==')
     windower.add_to_chat(207, ' ** Launch the dashboard from the ParseVis\html\index.html **')
-    windower.add_to_chat(207, ' - //pv report : Manually export data to the dashboard immediately.')
-    windower.add_to_chat(207, ' - //pv reset  : Clear all combat data from the current session.')
-    windower.add_to_chat(207, ' - //pv silent : Toggle the chat message when data auto-exports.')
+    windower.add_to_chat(207, ' - //pv report   : Manually export data to the dashboard immediately.')
+    windower.add_to_chat(207, ' - //pv snapshot : Save a timestamped snapshot of current data.')
+    windower.add_to_chat(207, ' - //pv reset    : Clear all combat data from the current session.')
+    windower.add_to_chat(207, ' - //pv silent   : Toggle the chat message when data auto-exports.')
     windower.add_to_chat(207, ' - //pv debug  : Toggle debug mode to print debug data to chat.')
     windower.add_to_chat(207, ' - //pv help   : Show this help menu.')
 end
@@ -26,7 +27,14 @@ end
 local function export_loop()
     while is_running do
         local data = action_parse.get_data()
-        if #data > 0 then
+        local has_data = false
+        if data.combat then
+            has_data = (#data.combat > 0 or #data.timeline > 0)
+        else
+            has_data = (#data > 0)
+        end
+        
+        if has_data then
             export.save(data, is_silent)
         end
         coroutine.sleep(autoexport_interval)
@@ -49,11 +57,15 @@ windower.register_event('addon command', function(...)
 
     if cmd == 'reset' then
         action_parse.reset()
-        export.save({}, is_silent)
+        export.save({combat={}, timeline={}}, is_silent)
         windower.add_to_chat(207, '[ParseVis] Data reset.')
     elseif cmd == 'report' then
         export.save(action_parse.get_data(), is_silent)
         windower.add_to_chat(207, '[ParseVis] Data manually exported.')
+    elseif cmd == 'snapshot' then
+        local timestamp = os.date("%Y-%m-%d-%H%M%S")
+        local filename = 'data_snapshot-' .. timestamp .. '.js'
+        export.save(action_parse.get_data(), false, filename)
     elseif cmd == 'silent' then
         is_silent = not is_silent
         windower.add_to_chat(207, '[ParseVis] Silent mode: ' .. tostring(is_silent))

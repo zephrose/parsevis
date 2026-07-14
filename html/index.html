@@ -13,6 +13,16 @@
         <header>
             <h1>ParseVis <span>Dashboard</span></h1>
             <div class="controls">
+                <div class="range-controls">
+                    <div class="range-group">
+                        <label>Start: <span id="start-label">00:00</span></label>
+                        <input type="range" id="start-range" min="0" max="100" value="0">
+                    </div>
+                    <div class="range-group">
+                        <label>End: <span id="end-label">End</span></label>
+                        <input type="range" id="end-range" min="0" max="100" value="100">
+                    </div>
+                </div>
                 <button id="refresh-btn">Refresh Data</button>
             </div>
         </header>
@@ -37,15 +47,27 @@
                 <div class="tabs">
                     <button class="tab-btn active" onclick="switchTab('offensive-tab', this)">Offensive & Accuracy</button>
                     <button class="tab-btn" onclick="switchTab('defensive-tab', this)">Defensive & Healing</button>
+                    <div class="filters" style="display: flex; gap: 1rem; margin-left: auto; align-items: center;">
+                        <select id="player-filter" class="filter-select">
+                            <option value="All">All Players</option>
+                        </select>
+                        <select id="event-filter" class="filter-select">
+                            <option value="All">All Events</option>
+                        </select>
+                    </div>
                 </div>
 
                 <div id="offensive-tab" class="tab-content active">
-                    <div class="chart-row">
+                    <div class="chart-row split">
                         <div class="card main-chart">
                             <h2>Damage Over Time</h2>
                             <div class="canvas-container">
                                 <canvas id="dpsChart"></canvas>
                             </div>
+                        </div>
+                        <div class="card event-feed-card">
+                            <h2>Event Feed</h2>
+                            <div id="event-feed" class="event-feed-list"></div>
                         </div>
                     </div>
 

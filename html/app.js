@@ -27,6 +27,11 @@ function formatNumber(num) {
     return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
+let globalData = { combat: [], timeline: [] };
+
+let minTimestamp = 0;
+let maxTimestamp = 0;
+
 function initDashboard() {
     // If parseData doesn't exist yet, default to empty
     const rawData = typeof parseData !== 'undefined' ? parseData : [];
@@ -35,10 +40,146 @@ function initDashboard() {
         if (rawData.length === 0) {
             console.warn("No parse data found. Trigger an export in FFXI first.");
         }
-        processData(rawData, []);
+        globalData = { combat: rawData, timeline: [] };
     } else {
-        processData(rawData.combat || [], rawData.timeline || []);
+        globalData = { combat: rawData.combat || [], timeline: rawData.timeline || [] };
     }
+
+    if (globalData.combat.length > 0) {
+        minTimestamp = Math.min(...globalData.combat.map(e => e.timestamp));
+        maxTimestamp = Math.max(...globalData.combat.map(e => e.timestamp));
+        
+        const startSlider = document.getElementById('start-range');
+        const endSlider = document.getElementById('end-range');
+        
+        startSlider.min = minTimestamp;
+        startSlider.max = maxTimestamp;
+        startSlider.value = minTimestamp;
+        
+        endSlider.min = minTimestamp;
+        endSlider.max = maxTimestamp;
+        endSlider.value = maxTimestamp;
+        
+        populateFilters();
+    }
+
+    applyTimeFilter();
+}
+
+function formatPlayerName(name) {
+    if (globalData.jobs && globalData.jobs[name]) {
+        const j = globalData.jobs[name];
+        return `${name} (${j.main}/${j.sub})`;
+    }
+    return name;
+}
+
+function populateFilters() {
+    const players = new Set();
+    const events = new Set();
+    
+    // Timeline only tracks p0-p5 (and their pets), making it perfect for extracting just player names
+    globalData.timeline.forEach(e => {
+        players.add(e.actor);
+        events.add(e.action);
+    });
+    
+    const pSelect = document.getElementById('player-filter');
+    const eSelect = document.getElementById('event-filter');
+    
+    const currP = pSelect.value;
+    const currE = eSelect.value;
+
+    pSelect.innerHTML = '<option value="All">All Players</option>';
+    eSelect.innerHTML = '<option value="All">All Events</option>';
+    
+    Array.from(players).sort().forEach(p => {
+        pSelect.innerHTML += `<option value="${p}">${formatPlayerName(p)}</option>`;
+    });
+    
+    Array.from(events).sort().forEach(ev => {
+        eSelect.innerHTML += `<option value="${ev}">${ev}</option>`;
+    });
+    
+    // Attempt to restore previous selection
+    if (players.has(currP)) pSelect.value = currP;
+    if (events.has(currE)) eSelect.value = currE;
+}
+
+function formatTimeLabel(ts) {
+    const d = new Date(ts * 1000);
+    return d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+}
+
+function applyTimeFilter(e) {
+    if (globalData.combat.length === 0) {
+        processData(globalData.combat, globalData.timeline);
+        renderEventFeed(globalData.timeline);
+        return;
+    }
+
+    const startSlider = document.getElementById('start-range');
+    const endSlider = document.getElementById('end-range');
+    const playerFilter = document.getElementById('player-filter').value;
+    const eventFilter = document.getElementById('event-filter').value;
+    
+    let startVal = parseInt(startSlider.value);
+    let endVal = parseInt(endSlider.value);
+    
+    // Prevent crossing
+    if (startVal > endVal) {
+        if (e && e.target.id === 'start-range') {
+            startVal = endVal;
+            startSlider.value = endVal;
+        } else {
+            endVal = startVal;
+            endSlider.value = startVal;
+        }
+    }
+
+    document.getElementById('start-label').textContent = formatTimeLabel(startVal);
+    document.getElementById('end-label').textContent = formatTimeLabel(endVal);
+
+    let filteredCombat = globalData.combat.filter(ev => ev.timestamp >= startVal && ev.timestamp <= endVal);
+    let filteredTimeline = globalData.timeline.filter(ev => ev.timestamp >= startVal && ev.timestamp <= endVal);
+
+    if (playerFilter !== 'All') {
+        filteredCombat = filteredCombat.filter(ev => ev.actor === playerFilter || ev.target === playerFilter);
+        filteredTimeline = filteredTimeline.filter(ev => ev.actor === playerFilter);
+    }
+    
+    if (eventFilter !== 'All') {
+        filteredTimeline = filteredTimeline.filter(ev => ev.action === eventFilter);
+        // Fallback for combat if event matches a generic type
+        filteredCombat = filteredCombat.filter(ev => ev.detail === eventFilter || ev.type === eventFilter || filteredTimeline.length > 0);
+    }
+
+    processData(filteredCombat, filteredTimeline);
+    renderEventFeed(filteredTimeline);
+}
+
+function renderEventFeed(timeline) {
+    const feed = document.getElementById('event-feed');
+    feed.innerHTML = '';
+    
+    timeline.forEach(ev => {
+        const item = document.createElement('div');
+        item.className = 'event-item';
+        
+        const d = new Date(ev.timestamp * 1000);
+        const timeStr = d.getHours().toString().padStart(2, '0') + ':' + 
+                        d.getMinutes().toString().padStart(2, '0') + ':' + 
+                        d.getSeconds().toString().padStart(2, '0');
+                        
+        const valStr = ev.damage > 0 ? ` (<span class="val">${formatNumber(ev.damage)}</span>)` : '';
+        
+        item.innerHTML = `
+            <div class="time">${timeStr}</div>
+            <div class="details"><span class="player">${formatPlayerName(ev.actor)}</span>: ${ev.action}${valStr}</div>
+        `;
+        
+        feed.appendChild(item);
+    });
 }
 
 function processData(data, timelineData) {
@@ -167,7 +308,7 @@ function renderDpsChart(timelineMap, players, significantEvents) {
         const pColor = playerColors[i % playerColors.length];
         return {
             type: 'line',
-            label: p,
+            label: formatPlayerName(p),
             data: times.map(t => timelineMap.get(t)[p] || 0),
             borderColor: pColor,
             backgroundColor: pColor + '40', // 25% opacity
@@ -227,7 +368,7 @@ function renderDpsChart(timelineMap, players, significantEvents) {
                         label: function(context) {
                             if (context.dataset.type === 'scatter') {
                                 const ev = context.raw;
-                                return `${ev.player} - ${ev.detail.toUpperCase()}: ${formatNumber(ev.y)}`;
+                                return `${formatPlayerName(ev.player)} - ${ev.detail.toUpperCase()}: ${formatNumber(ev.y)}`;
                             }
                             return `${context.dataset.label}: ${formatNumber(context.parsed.y)}`;
                         }
@@ -253,7 +394,7 @@ function renderBreakdownChart(breakdownMap, players) {
 
     breakdownChart = new Chart(ctx, {
         type: 'bar',
-        data: { labels: players, datasets },
+        data: { labels: players.map(formatPlayerName), datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
@@ -308,7 +449,7 @@ function renderAccuracyChart(accMap, players) {
 
     accuracyChart = new Chart(ctx, {
         type: 'bar',
-        data: { labels: players, datasets },
+        data: { labels: players.map(formatPlayerName), datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
@@ -342,7 +483,7 @@ function renderEvasionChart(defMap, players) {
 
     evasionChart = new Chart(ctx, {
         type: 'bar',
-        data: { labels: players, datasets },
+        data: { labels: players.map(formatPlayerName), datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
@@ -375,7 +516,7 @@ function renderDamageTakenChart(defMap, players) {
 
     damageTakenChart = new Chart(ctx, {
         type: 'bar',
-        data: { labels: players, datasets },
+        data: { labels: players.map(formatPlayerName), datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
@@ -401,7 +542,7 @@ function renderHealingChart(healMap, players) {
 
     healingChart = new Chart(ctx, {
         type: 'bar',
-        data: { labels: players, datasets },
+        data: { labels: players.map(formatPlayerName), datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
@@ -420,6 +561,11 @@ function renderHealingChart(healMap, players) {
 document.getElementById('refresh-btn').addEventListener('click', () => {
     window.location.reload();
 });
+
+document.getElementById('start-range').addEventListener('input', applyTimeFilter);
+document.getElementById('end-range').addEventListener('input', applyTimeFilter);
+document.getElementById('player-filter').addEventListener('change', applyTimeFilter);
+document.getElementById('event-filter').addEventListener('change', applyTimeFilter);
 
 // Init on load
 document.addEventListener('DOMContentLoaded', initDashboard);
