@@ -4,6 +4,7 @@ local packets = require('packets')
 local res = require('resources')
 
 local combat_events = {}
+local timeline_events = {}
 
 local offense_action_messages = {
 	[1] = 'melee', [67] = 'crit', [15] = 'miss', [63] = 'miss',
@@ -44,17 +45,18 @@ local function get_player_info(id)
     local is_pet = false
     local owner_name = nil
 
+    local party = windower.ffxi.get_party()
     if mob.is_npc then
-        for _, v in pairs(windower.ffxi.get_party()) do
-            if type(v) == 'table' and v.mob and v.mob.pet_index == mob.index then
+        for k, v in pairs(party) do
+            if type(v) == 'table' and string.sub(k, 1, 1) == 'p' and v.mob and v.mob.pet_index == mob.index then
                 is_pet = true
                 owner_name = v.name
                 break
             end
         end
     else
-        for _, v in pairs(windower.ffxi.get_party()) do
-            if type(v) == 'table' and v.mob and v.mob.id == mob.id then
+        for k, v in pairs(party) do
+            if type(v) == 'table' and string.sub(k, 1, 1) == 'p' and v.mob and v.mob.id == mob.id then
                 is_party_or_alliance = true
                 break
             end
@@ -82,6 +84,16 @@ local function record_event(actor_name, target_name, act_type, action_detail, va
     })
 end
 
+local function record_timeline_event(actor_name, action_name, act_type, damage)
+    table.insert(timeline_events, {
+        timestamp = os.time(),
+        actor = actor_name,
+        action = action_name,
+        type = act_type,
+        damage = damage
+    })
+end
+
 action_parse.debug_mode = false
 
 windower.register_event('action', function(act)
@@ -90,6 +102,17 @@ windower.register_event('action', function(act)
     
     local is_party_actor = actor.is_party or actor.is_pet
     local display_name = actor.is_pet and (actor.name .. " (" .. actor.owner .. ")") or actor.name
+
+    local action_name = nil
+    if is_party_actor then
+        if act.category == 3 and res.weapon_skills[act.param] then
+            action_name = res.weapon_skills[act.param].en
+        elseif act.category == 4 and res.spells[act.param] then
+            action_name = res.spells[act.param].en
+        elseif (act.category == 6 or act.category == 13 or act.category == 14 or act.category == 15) and res.job_abilities[act.param] then
+            action_name = res.job_abilities[act.param].en
+        end
+    end
 
     for _, targ in pairs(act.targets) do
         local target_info = get_player_info(targ.id)
@@ -116,6 +139,10 @@ windower.register_event('action', function(act)
                             -- Minor edge case: if party attacks party (e.g. charmed), it will log as offense for the attacker. 
                             -- That's usually fine.
                             record_event(display_name, t_name, act_cat, off_act, m.param, is_hit)
+                            
+                            if is_party_actor and action_name and is_hit and act_cat == 'offense' then
+                                record_timeline_event(display_name, action_name, off_act, m.param)
+                            end
                         end
                         
                         -- Check Healing
@@ -124,6 +151,9 @@ windower.register_event('action', function(act)
                             -- Only record healing if it comes from the party
                             if is_party_actor then
                                 record_event(display_name, t_name, 'healing', heal_act, m.param, true)
+                                if action_name then
+                                    record_timeline_event(display_name, action_name, 'healing', m.param)
+                                end
                             end
                         end
                         
@@ -141,11 +171,15 @@ windower.register_event('action', function(act)
 end)
 
 function action_parse.get_data()
-    return combat_events
+    return {
+        combat = combat_events,
+        timeline = timeline_events
+    }
 end
 
 function action_parse.reset()
     combat_events = {}
+    timeline_events = {}
 end
 
 return action_parse
