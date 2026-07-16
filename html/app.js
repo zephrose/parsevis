@@ -198,8 +198,12 @@ function processData(data, timelineData) {
     const accMap = new Map(); // player -> { hits: 0, misses: 0 }
     const significantEvents = []; // list of {bucket: time, player: p, detail: action, value: damage}
 
+    // We need to iterate chronologically to build cumulative damage
+    const sortedData = [...data].sort((a, b) => a.timestamp - b.timestamp);
+    const currentCumDmg = {};
+
     // Aggregate Data
-    data.forEach(event => {
+    sortedData.forEach(event => {
         const p = event.actor;
         
         // Use target for defensive events since actor is the mob
@@ -246,12 +250,14 @@ function processData(data, timelineData) {
             }
         }
 
-        // Timeline (group by 10s intervals)
+        // Timeline (group by 10s intervals) - Cumulative Damage
         if (event.type === 'offense' || event.type === 'skillchain') {
             const bucket = Math.floor(event.timestamp / 10) * 10;
+            if (!currentCumDmg[p]) currentCumDmg[p] = 0;
+            currentCumDmg[p] += event.value;
+
             if (!timelineMap.has(bucket)) timelineMap.set(bucket, {});
-            if (!timelineMap.get(bucket)[p]) timelineMap.get(bucket)[p] = 0;
-            timelineMap.get(bucket)[p] += event.value;
+            timelineMap.get(bucket)[p] = currentCumDmg[p];
         }
     });
 
@@ -268,7 +274,7 @@ function processData(data, timelineData) {
         });
     } else {
         // Fallback: extract from regular combat_events if no timelineData
-        data.forEach(event => {
+        sortedData.forEach(event => {
             if (event.type === 'offense' || event.type === 'skillchain') {
                 const bucket = Math.floor(event.timestamp / 10) * 10;
                 if (event.detail.includes('ws') || event.detail.includes('spell') || event.detail.includes('ja') || event.detail.includes('mb') || event.detail.includes('sc')) {
@@ -290,7 +296,19 @@ function processData(data, timelineData) {
     let wsAvg = totalWsCount > 0 ? Math.floor(totalWsDmg / totalWsCount) : 0;
     document.getElementById('ws-average').textContent = formatNumber(wsAvg);
 
-    renderDpsChart(timelineMap, Array.from(players), significantEvents);
+    const sortedPlayers = Array.from(players).sort((a, b) => {
+        const dmgA = currentCumDmg[a] || 0;
+        const dmgB = currentCumDmg[b] || 0;
+        return dmgA - dmgB; // Ascending: lowest to highest
+    });
+
+    const playerPercentages = {};
+    sortedPlayers.forEach(p => {
+        const dmg = currentCumDmg[p] || 0;
+        playerPercentages[p] = totalDmg > 0 ? ((dmg / totalDmg) * 100).toFixed(1) : 0;
+    });
+
+    renderDpsChart(timelineMap, sortedPlayers, significantEvents, playerPercentages);
     renderBreakdownChart(breakdownMap, Array.from(players));
     renderAccuracyChart(accMap, Array.from(players));
     renderEvasionChart(defMap, Array.from(players));
@@ -298,20 +316,36 @@ function processData(data, timelineData) {
     renderHealingChart(healMap, Array.from(players));
 }
 
-function renderDpsChart(timelineMap, players, significantEvents) {
+function renderDpsChart(timelineMap, players, significantEvents, playerPercentages) {
     const ctx = document.getElementById('dpsChart').getContext('2d');
     
-    // Sort time buckets
-    const times = Array.from(timelineMap.keys()).sort();
+    // Sort time buckets numerically
+    const times = Array.from(timelineMap.keys()).sort((a, b) => a - b);
     
+    // Track player cumulatives for their individual line
+    const playerCumulatives = {};
+
     const datasets = players.map((p, i) => {
         const pColor = playerColors[i % playerColors.length];
+        
+        let lastCumDmg = 0;
+        playerCumulatives[p] = {};
+        const dataArr = times.map(t => {
+            if (timelineMap.get(t)[p] !== undefined) {
+                lastCumDmg = timelineMap.get(t)[p];
+            }
+            playerCumulatives[p][t] = lastCumDmg;
+            return lastCumDmg;
+        });
+
+        const labelText = playerPercentages ? `${formatPlayerName(p)} (${playerPercentages[p]}%)` : formatPlayerName(p);
+
         return {
             type: 'line',
-            label: formatPlayerName(p),
-            data: times.map(t => timelineMap.get(t)[p] || 0),
+            label: labelText,
+            data: dataArr,
             borderColor: pColor,
-            backgroundColor: pColor + '40', // 25% opacity
+            backgroundColor: pColor + '80', // 50% opacity for stacked visibility
             fill: true,
             tension: 0.4,
             order: 2
@@ -328,9 +362,34 @@ function renderDpsChart(timelineMap, players, significantEvents) {
     const scatterData = significantEvents.map(ev => {
         const d = new Date(ev.bucket * 1000);
         const timeLabel = d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+        
+        // Find the closest previous bucket to evaluate stacked height
+        let targetBucket = ev.bucket;
+        if (!times.includes(targetBucket)) {
+            let closestVal = times.length > 0 ? times[0] : 0;
+            for (let i = 0; i < times.length; i++) {
+                if (times[i] <= ev.bucket) closestVal = times[i];
+                else break;
+            }
+            targetBucket = closestVal;
+        }
+
+        // Calculate stacked Y value
+        let stackedY = 0;
+        for (let i = 0; i < players.length; i++) {
+            const p = players[i];
+            const pCumul = (playerCumulatives[p] && playerCumulatives[p][targetBucket] !== undefined) ? playerCumulatives[p][targetBucket] : 0;
+            stackedY += pCumul;
+            
+            if (p === ev.player) {
+                break;
+            }
+        }
+
         return {
             x: timeLabel,
-            y: ev.value,
+            y: stackedY,
+            actionDamage: ev.value,
             player: ev.player,
             detail: ev.detail
         };
@@ -359,7 +418,7 @@ function renderDpsChart(timelineMap, players, significantEvents) {
             interaction: { mode: 'index', intersect: false },
             scales: {
                 x: { grid: { color: COLORS.grid } },
-                y: { grid: { color: COLORS.grid }, beginAtZero: true }
+                y: { stacked: true, grid: { color: COLORS.grid }, beginAtZero: true }
             },
             plugins: {
                 legend: { labels: { color: COLORS.textMain } },
@@ -368,8 +427,10 @@ function renderDpsChart(timelineMap, players, significantEvents) {
                         label: function(context) {
                             if (context.dataset.type === 'scatter') {
                                 const ev = context.raw;
-                                return `${formatPlayerName(ev.player)} - ${ev.detail.toUpperCase()}: ${formatNumber(ev.y)}`;
+                                return `${formatPlayerName(ev.player)} - ${ev.detail.toUpperCase()} (${formatNumber(ev.actionDamage)})`;
                             }
+                            // Only output label if there's actual data to avoid showing zeroes on stacked bottom bands early on
+                            if (context.parsed.y === null || context.parsed.y === 0) return null;
                             return `${context.dataset.label}: ${formatNumber(context.parsed.y)}`;
                         }
                     }
