@@ -162,6 +162,11 @@ function renderEventFeed(timeline) {
     const feed = document.getElementById('event-feed');
     feed.innerHTML = '';
     
+    if (timeline.length === 0) {
+        feed.innerHTML = '<div style="padding: 1rem; color: #94a3b8; text-align: center; font-style: italic;">Event tracking is disabled or no events recorded.<br><br>Use <code>//pv events</code> in-game to toggle event tracking.</div>';
+        return;
+    }
+    
     timeline.forEach(ev => {
         const item = document.createElement('div');
         item.className = 'event-item';

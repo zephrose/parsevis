@@ -105,6 +105,7 @@ local function record_event(actor_name, target_name, act_type, action_detail, va
 end
 
 local function record_timeline_event(actor_name, action_name, act_type, damage)
+    if not action_parse.track_events then return end
     table.insert(timeline_events, {
         timestamp = socket.gettime(),
         actor = actor_name,
@@ -115,6 +116,7 @@ local function record_timeline_event(actor_name, action_name, act_type, damage)
 end
 
 action_parse.debug_mode = false
+action_parse.track_events = true
 
 windower.register_event('action', function(act)
     local actor = get_player_info(act.actor_id)
@@ -204,6 +206,27 @@ function action_parse.get_data()
         timeline = timeline_events,
         jobs = party_jobs
     }
+end
+
+function action_parse.get_and_clear_data()
+    local p = windower.ffxi.get_player()
+    if p and p.name and p.main_job_id and p.sub_job_id then
+        party_jobs[p.name] = {
+            main = res.jobs[p.main_job_id] and res.jobs[p.main_job_id].en_short or "UNK",
+            sub = res.jobs[p.sub_job_id] and res.jobs[p.sub_job_id].en_short or "UNK"
+        }
+    end
+
+    local data = {
+        combat = combat_events,
+        timeline = timeline_events,
+        jobs = party_jobs
+    }
+    
+    combat_events = {}
+    timeline_events = {}
+    
+    return data
 end
 
 function action_parse.reset()
