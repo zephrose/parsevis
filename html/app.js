@@ -10,7 +10,9 @@ const COLORS = {
     sc: '#f97316',
     healing: '#10b981',
     miss: '#64748b',
-    hit: '#3b82f6'
+    hit: '#3b82f6',
+    ja: '#ec4899',
+    crit: '#ef4444'
 };
 
 // Player colors for line chart (generated dynamically)
@@ -21,7 +23,7 @@ const playerColors = [
 Chart.defaults.color = COLORS.textMuted;
 Chart.defaults.font.family = "'Outfit', sans-serif";
 
-let dpsChart, breakdownChart, accuracyChart, evasionChart, damageTakenChart, healingChart;
+let dpsChart, breakdownChart, accuracyChart, evasionChart, damageTakenChart, healingChart, critChart, attackRateChart;
 
 function formatNumber(num) {
     return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -48,18 +50,18 @@ function initDashboard() {
     if (globalData.combat.length > 0) {
         minTimestamp = Math.min(...globalData.combat.map(e => e.timestamp));
         maxTimestamp = Math.max(...globalData.combat.map(e => e.timestamp));
-        
+
         const startSlider = document.getElementById('start-range');
         const endSlider = document.getElementById('end-range');
-        
+
         startSlider.min = minTimestamp;
         startSlider.max = maxTimestamp;
         startSlider.value = minTimestamp;
-        
+
         endSlider.min = minTimestamp;
         endSlider.max = maxTimestamp;
         endSlider.value = maxTimestamp;
-        
+
         populateFilters();
     }
 
@@ -77,30 +79,30 @@ function formatPlayerName(name) {
 function populateFilters() {
     const players = new Set();
     const events = new Set();
-    
+
     // Timeline only tracks p0-p5 (and their pets), making it perfect for extracting just player names
     globalData.timeline.forEach(e => {
         players.add(e.actor);
         events.add(e.action);
     });
-    
+
     const pSelect = document.getElementById('player-filter');
     const eSelect = document.getElementById('event-filter');
-    
+
     const currP = pSelect.value;
     const currE = eSelect.value;
 
     pSelect.innerHTML = '<option value="All">All Players</option>';
     eSelect.innerHTML = '<option value="All">All Events</option>';
-    
+
     Array.from(players).sort().forEach(p => {
         pSelect.innerHTML += `<option value="${p}">${formatPlayerName(p)}</option>`;
     });
-    
+
     Array.from(events).sort().forEach(ev => {
         eSelect.innerHTML += `<option value="${ev}">${ev}</option>`;
     });
-    
+
     // Attempt to restore previous selection
     if (players.has(currP)) pSelect.value = currP;
     if (events.has(currE)) eSelect.value = currE;
@@ -122,10 +124,10 @@ function applyTimeFilter(e) {
     const endSlider = document.getElementById('end-range');
     const playerFilter = document.getElementById('player-filter').value;
     const eventFilter = document.getElementById('event-filter').value;
-    
+
     let startVal = parseInt(startSlider.value);
     let endVal = parseInt(endSlider.value);
-    
+
     // Prevent crossing
     if (startVal > endVal) {
         if (e && e.target.id === 'start-range') {
@@ -147,7 +149,7 @@ function applyTimeFilter(e) {
         filteredCombat = filteredCombat.filter(ev => ev.actor === playerFilter || ev.target === playerFilter);
         filteredTimeline = filteredTimeline.filter(ev => ev.actor === playerFilter);
     }
-    
+
     if (eventFilter !== 'All') {
         filteredTimeline = filteredTimeline.filter(ev => ev.action === eventFilter);
         // Fallback for combat if event matches a generic type
@@ -161,28 +163,28 @@ function applyTimeFilter(e) {
 function renderEventFeed(timeline) {
     const feed = document.getElementById('event-feed');
     feed.innerHTML = '';
-    
+
     if (timeline.length === 0) {
         feed.innerHTML = '<div style="padding: 1rem; color: #94a3b8; text-align: center; font-style: italic;">Event tracking is disabled or no events recorded.<br><br>Use <code>//pv events</code> in-game to toggle event tracking.</div>';
         return;
     }
-    
+
     timeline.forEach(ev => {
         const item = document.createElement('div');
         item.className = 'event-item';
-        
+
         const d = new Date(ev.timestamp * 1000);
-        const timeStr = d.getHours().toString().padStart(2, '0') + ':' + 
-                        d.getMinutes().toString().padStart(2, '0') + ':' + 
-                        d.getSeconds().toString().padStart(2, '0');
-                        
+        const timeStr = d.getHours().toString().padStart(2, '0') + ':' +
+            d.getMinutes().toString().padStart(2, '0') + ':' +
+            d.getSeconds().toString().padStart(2, '0');
+
         const valStr = ev.damage > 0 ? ` (<span class="val">${formatNumber(ev.damage)}</span>)` : '';
-        
+
         item.innerHTML = `
             <div class="time">${timeStr}</div>
             <div class="details"><span class="player">${formatPlayerName(ev.actor)}</span>: ${ev.action}${valStr}</div>
         `;
-        
+
         feed.appendChild(item);
     });
 }
@@ -197,10 +199,12 @@ function processData(data, timelineData) {
 
     const players = new Set();
     const timelineMap = new Map(); // timestamp (rounded to 10s) -> { player: damage }
-    const breakdownMap = new Map(); // player -> { melee, ws, spell, sc, ranged }
+    const breakdownMap = new Map(); // player -> { melee, ws, spell, sc, ranged, ja }
+    const critMap = new Map(); // player -> { crits: 0 }
     const defMap = new Map(); // player -> { hitsTaken: 0, missesEvaded: 0, dmgTaken: 0 }
     const healMap = new Map(); // player -> { amount: 0 }
     const accMap = new Map(); // player -> { hits: 0, misses: 0 }
+    const attackTimesMap = new Map(); // player -> [timestamps]
     const significantEvents = []; // list of {bucket: time, player: p, detail: action, value: damage}
 
     // We need to iterate chronologically to build cumulative damage
@@ -210,15 +214,16 @@ function processData(data, timelineData) {
     // Aggregate Data
     sortedData.forEach(event => {
         const p = event.actor;
-        
+
         // Use target for defensive events since actor is the mob
         const target = event.target;
-        
+
         // Initialize maps
         if (event.type !== 'defense') players.add(p);
         else players.add(target);
 
-        if (!breakdownMap.has(p)) breakdownMap.set(p, { melee: 0, ws: 0, spell: 0, sc: 0, ranged: 0 });
+        if (!breakdownMap.has(p)) breakdownMap.set(p, { melee: 0, ws: 0, spell: 0, sc: 0, ranged: 0, ja: 0 });
+        if (!critMap.has(p)) critMap.set(p, { crits: 0 });
         if (!healMap.has(p)) healMap.set(p, { amount: 0 });
         if (!accMap.has(p)) accMap.set(p, { hits: 0, misses: 0 });
         if (!defMap.has(target)) defMap.set(target, { hitsTaken: 0, missesEvaded: 0, dmgTaken: 0 });
@@ -241,17 +246,28 @@ function processData(data, timelineData) {
                 breakdownMap.get(p).sc += event.value;
             } else if (event.type === 'offense') {
                 if (event.hit) accMap.get(p).hits++; else accMap.get(p).misses++;
-                
+
                 // Categorize
                 const d = event.detail;
-                if (d.includes('melee') || d.includes('crit')) breakdownMap.get(p).melee += event.value;
+
+                if (d === 'crit' || d === 'r_crit') {
+                    critMap.get(p).crits++;
+                }
+
+                if (['melee', 'crit', 'miss', 'ranged', 'r_crit', 'r_miss'].includes(d)) {
+                    if (!attackTimesMap.has(p)) attackTimesMap.set(p, []);
+                    attackTimesMap.get(p).push(event.timestamp);
+                }
+
+                if (d === 'melee' || d === 'crit') breakdownMap.get(p).melee += event.value;
                 else if (d.includes('ws')) {
                     breakdownMap.get(p).ws += event.value;
                     totalWsDmg += event.value;
                     totalWsCount++;
                 }
                 else if (d.includes('spell') || d.includes('mb')) breakdownMap.get(p).spell += event.value;
-                else if (d.includes('ranged')) breakdownMap.get(p).ranged += event.value;
+                else if (d.includes('ranged') || d === 'r_crit') breakdownMap.get(p).ranged += event.value;
+                else if (d === 'ja' || d === 'aoe' || d === 'Barrage' || d === 'Sange') breakdownMap.get(p).ja += event.value;
             }
         }
 
@@ -294,10 +310,37 @@ function processData(data, timelineData) {
         });
     }
 
+    const attackRateMap = new Map();
+    players.forEach(p => {
+        const times = attackTimesMap.get(p) || [];
+        if (times.length < 2) {
+            attackRateMap.set(p, 0);
+            return;
+        }
+
+        let totalActiveTime = 0;
+        let attackRounds = 1;
+
+        for (let i = 1; i < times.length; i++) {
+            const diff = times[i] - times[i - 1];
+            if (diff > 0.5) { // Threshold for same attack round (e.g. dual wield, double attack)
+                attackRounds++;
+                if (diff <= 10) { // 10s gap to be considered continuous combat
+                    totalActiveTime += diff;
+                }
+            }
+        }
+
+        const activeRounds = attackRounds > 1 ? attackRounds - 1 : 1;
+        const delay = totalActiveTime > 0 ? (totalActiveTime / activeRounds).toFixed(2) : 0;
+
+        attackRateMap.set(p, delay);
+    });
+
     // Update Top Cards
     document.getElementById('total-damage').textContent = formatNumber(totalDmg);
     document.getElementById('total-healing').textContent = formatNumber(totalHeal);
-    
+
     let wsAvg = totalWsCount > 0 ? Math.floor(totalWsDmg / totalWsCount) : 0;
     document.getElementById('ws-average').textContent = formatNumber(wsAvg);
 
@@ -315,6 +358,8 @@ function processData(data, timelineData) {
 
     renderDpsChart(timelineMap, sortedPlayers, significantEvents, playerPercentages);
     renderBreakdownChart(breakdownMap, Array.from(players));
+    renderCritChart(critMap, Array.from(players));
+    renderAttackRateChart(attackRateMap, Array.from(players));
     renderAccuracyChart(accMap, Array.from(players));
     renderEvasionChart(defMap, Array.from(players));
     renderDamageTakenChart(defMap, Array.from(players));
@@ -323,16 +368,16 @@ function processData(data, timelineData) {
 
 function renderDpsChart(timelineMap, players, significantEvents, playerPercentages) {
     const ctx = document.getElementById('dpsChart').getContext('2d');
-    
+
     // Sort time buckets numerically
     const times = Array.from(timelineMap.keys()).sort((a, b) => a - b);
-    
+
     // Track player cumulatives for their individual line
     const playerCumulatives = {};
 
     const datasets = players.map((p, i) => {
         const pColor = playerColors[i % playerColors.length];
-        
+
         let lastCumDmg = 0;
         playerCumulatives[p] = {};
         const dataArr = times.map(t => {
@@ -367,7 +412,7 @@ function renderDpsChart(timelineMap, players, significantEvents, playerPercentag
     const scatterData = significantEvents.map(ev => {
         const d = new Date(ev.bucket * 1000);
         const timeLabel = d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
-        
+
         // Find the closest previous bucket to evaluate stacked height
         let targetBucket = ev.bucket;
         if (!times.includes(targetBucket)) {
@@ -385,7 +430,7 @@ function renderDpsChart(timelineMap, players, significantEvents, playerPercentag
             const p = players[i];
             const pCumul = (playerCumulatives[p] && playerCumulatives[p][targetBucket] !== undefined) ? playerCumulatives[p][targetBucket] : 0;
             stackedY += pCumul;
-            
+
             if (p === ev.player) {
                 break;
             }
@@ -429,7 +474,7 @@ function renderDpsChart(timelineMap, players, significantEvents, playerPercentag
                 legend: { labels: { color: COLORS.textMain } },
                 tooltip: {
                     callbacks: {
-                        label: function(context) {
+                        label: function (context) {
                             if (context.dataset.type === 'scatter') {
                                 const ev = context.raw;
                                 return `${formatPlayerName(ev.player)} - ${ev.detail.toUpperCase()} (${formatNumber(ev.actionDamage)})`;
@@ -447,13 +492,14 @@ function renderDpsChart(timelineMap, players, significantEvents, playerPercentag
 
 function renderBreakdownChart(breakdownMap, players) {
     const ctx = document.getElementById('breakdownChart').getContext('2d');
-    
+
     const datasets = [
         { label: 'Melee', backgroundColor: COLORS.melee, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).melee : 0) },
         { label: 'Weaponskill', backgroundColor: COLORS.ws, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).ws : 0) },
         { label: 'Magic', backgroundColor: COLORS.spell, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).spell : 0) },
         { label: 'Skillchain', backgroundColor: COLORS.sc, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).sc : 0) },
-        { label: 'Ranged', backgroundColor: COLORS.ranged, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).ranged : 0) }
+        { label: 'Ranged', backgroundColor: COLORS.ranged, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).ranged : 0) },
+        { label: 'Job Ability', backgroundColor: COLORS.ja, data: players.map(p => breakdownMap.get(p) ? breakdownMap.get(p).ja : 0) }
     ];
 
     if (breakdownChart) breakdownChart.destroy();
@@ -472,7 +518,7 @@ function renderBreakdownChart(breakdownMap, players) {
                 legend: { position: 'bottom', labels: { color: COLORS.textMain } },
                 tooltip: {
                     callbacks: {
-                        label: function(context) {
+                        label: function (context) {
                             let label = context.dataset.label || '';
                             if (label) {
                                 label += ': ';
@@ -486,14 +532,14 @@ function renderBreakdownChart(breakdownMap, players) {
                                 playerTotal += Number(ds.data[context.dataIndex]) || 0;
                             });
                             let pPct = playerTotal > 0 ? ((context.parsed.y / playerTotal) * 100).toFixed(1) : 0;
-                            
+
                             // Calculate % of party total
                             let partyTotal = 0;
                             context.chart.data.datasets.forEach(ds => {
                                 ds.data.forEach(val => { partyTotal += Number(val) || 0; });
                             });
                             let ptyPct = partyTotal > 0 ? ((context.parsed.y / partyTotal) * 100).toFixed(1) : 0;
-                            
+
                             return `${label} (${pPct}% of Player, ${ptyPct}% of Party)`;
                         }
                     }
@@ -505,7 +551,7 @@ function renderBreakdownChart(breakdownMap, players) {
 
 function renderAccuracyChart(accMap, players) {
     const ctx = document.getElementById('accuracyChart').getContext('2d');
-    
+
     const datasets = [
         { label: 'Hits', backgroundColor: COLORS.hit, data: players.map(p => accMap.get(p) ? ((accMap.get(p).hits / (accMap.get(p).hits + accMap.get(p).misses || 1)) * 100).toFixed(1) : 0) },
         { label: 'Misses', backgroundColor: COLORS.miss, data: players.map(p => accMap.get(p) ? ((accMap.get(p).misses / (accMap.get(p).hits + accMap.get(p).misses || 1)) * 100).toFixed(1) : 0) }
@@ -527,7 +573,7 @@ function renderAccuracyChart(accMap, players) {
                 legend: { position: 'bottom', labels: { color: COLORS.textMain } },
                 tooltip: {
                     callbacks: {
-                        label: function(context) {
+                        label: function (context) {
                             return `${context.dataset.label}: ${context.parsed.y}%`;
                         }
                     }
@@ -539,7 +585,7 @@ function renderAccuracyChart(accMap, players) {
 
 function renderEvasionChart(defMap, players) {
     const ctx = document.getElementById('evasionChart').getContext('2d');
-    
+
     const datasets = [
         { label: 'Evaded', backgroundColor: COLORS.healing, data: players.map(p => defMap.get(p) ? ((defMap.get(p).missesEvaded / (defMap.get(p).missesEvaded + defMap.get(p).hitsTaken || 1)) * 100).toFixed(1) : 0) },
         { label: 'Taken', backgroundColor: COLORS.melee, data: players.map(p => defMap.get(p) ? ((defMap.get(p).hitsTaken / (defMap.get(p).missesEvaded + defMap.get(p).hitsTaken || 1)) * 100).toFixed(1) : 0) }
@@ -561,7 +607,7 @@ function renderEvasionChart(defMap, players) {
                 legend: { position: 'bottom', labels: { color: COLORS.textMain } },
                 tooltip: {
                     callbacks: {
-                        label: function(context) {
+                        label: function (context) {
                             return `${context.dataset.label}: ${context.parsed.y}%`;
                         }
                     }
@@ -573,7 +619,7 @@ function renderEvasionChart(defMap, players) {
 
 function renderDamageTakenChart(defMap, players) {
     const ctx = document.getElementById('damageTakenChart').getContext('2d');
-    
+
     const datasets = [
         { label: 'Damage Taken', backgroundColor: COLORS.melee, data: players.map(p => defMap.get(p) ? defMap.get(p).dmgTaken : 0) }
     ];
@@ -599,7 +645,7 @@ function renderDamageTakenChart(defMap, players) {
 
 function renderHealingChart(healMap, players) {
     const ctx = document.getElementById('healingChart').getContext('2d');
-    
+
     const datasets = [
         { label: 'Healing Done', backgroundColor: COLORS.healing, data: players.map(p => healMap.get(p) ? healMap.get(p).amount : 0) }
     ];
@@ -607,6 +653,58 @@ function renderHealingChart(healMap, players) {
     if (healingChart) healingChart.destroy();
 
     healingChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: players.map(formatPlayerName), datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { grid: { display: false }, ticks: { color: COLORS.textMuted } },
+                y: { grid: { color: COLORS.grid }, ticks: { color: COLORS.textMuted } }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { color: COLORS.textMain } }
+            }
+        }
+    });
+}
+
+function renderCritChart(critMap, players) {
+    const ctx = document.getElementById('critChart').getContext('2d');
+
+    const datasets = [
+        { label: 'Critical Hits', backgroundColor: COLORS.crit, data: players.map(p => critMap.get(p) ? critMap.get(p).crits : 0) }
+    ];
+
+    if (critChart) critChart.destroy();
+
+    critChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: players.map(formatPlayerName), datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { grid: { display: false }, ticks: { color: COLORS.textMuted } },
+                y: { grid: { color: COLORS.grid }, ticks: { color: COLORS.textMuted } }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { color: COLORS.textMain } }
+            }
+        }
+    });
+}
+
+function renderAttackRateChart(attackRateMap, players) {
+    const ctx = document.getElementById('attackRateChart').getContext('2d');
+
+    const datasets = [
+        { label: 'Avg Attack Delay', backgroundColor: COLORS.ranged, data: players.map(p => attackRateMap.get(p) || 0) }
+    ];
+
+    if (attackRateChart) attackRateChart.destroy();
+
+    attackRateChart = new Chart(ctx, {
         type: 'bar',
         data: { labels: players.map(formatPlayerName), datasets },
         options: {
